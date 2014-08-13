@@ -17,6 +17,12 @@ type Response struct {
 	Headers HTTPHeader
 }
 
+var ResponseOK = &Response{
+	Version: "HTTP/1.1",
+	Status:  200,
+	Phrase:  "OK",
+}
+
 var ResponseInternalError = &Response{
 	Version: "HTTP/1.1",
 	Status:  500,

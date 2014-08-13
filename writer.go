@@ -35,7 +35,7 @@ func WriteRequest(w io.Writer, req *Request) {
 func WriteResponse(w io.Writer, res *Response) {
 	fmt.Fprintf(w, "%s %d %s\r\n", res.Version, res.Status, res.Phrase)
 	for k, v := range res.Headers {
-		fmt.Fprintf(w, "%s: %s\r\n", k, v)
+		fmt.Fprintf(w, "%s: %s\r\n", capitalizeHeader(k), v)
 	}
 	fmt.Fprintf(w, "\r\n")
 }

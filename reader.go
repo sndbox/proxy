@@ -64,8 +64,14 @@ type RequestReader struct {
 }
 
 func NewRequestReader(r io.Reader) *RequestReader {
+	var br *bufio.Reader
+	if casted, ok := r.(*bufio.Reader); ok {
+		br = casted
+	} else {
+		br = bufio.NewReader(r)
+	}
 	rr := &RequestReader{
-		baseReader{bufio.NewReader(r), make(chan error)},
+		baseReader{br, make(chan error)},
 		&Request{},
 		make(chan *Request),
 	}
@@ -121,8 +127,14 @@ type ResponseReader struct {
 }
 
 func NewResponseReader(r io.Reader) *ResponseReader {
+	var br *bufio.Reader
+	if casted, ok := r.(*bufio.Reader); ok {
+		br = casted
+	} else {
+		br = bufio.NewReader(r)
+	}
 	rr := &ResponseReader{
-		baseReader{bufio.NewReader(r), make(chan error)},
+		baseReader{br, make(chan error)},
 		&Response{},
 		make(chan *Response),
 	}
@@ -147,7 +159,7 @@ func parseStatusCode(ss string) (int, error) {
 	status, err := strconv.Atoi(ss)
 	first := status / 100
 	if err != nil || (first < 1 || first > 5) {
-		return 0, fmt.Errorf("Invalid status code")
+		return 0, fmt.Errorf("Invalid status code: %s", ss)
 	}
 	return status, nil
 }
@@ -181,4 +193,72 @@ func (r *ResponseReader) readResponseHeaders() error {
 
 func (r *ResponseReader) ResponseReceived() <-chan *Response {
 	return r.resCh
+}
+
+// BodyReader reads body of request or response
+type BodyReader interface {
+	Start()
+	Cancel()
+	BodyReceived() <-chan []byte
+	ErrorOccurred() <-chan error
+}
+
+type FixedLengthBodyReader struct {
+	r             io.Reader
+	contentLength int
+	bodyCh        chan []byte
+	errCh         chan error
+	done          chan struct{}
+}
+
+func NewFixedLengthBodyReader(r io.Reader, cl int) *FixedLengthBodyReader {
+	return &FixedLengthBodyReader{
+		r, cl, make(chan []byte), make(chan error), make(chan struct{})}
+}
+
+func (r *FixedLengthBodyReader) Start() {
+	go func() {
+		defer func() {
+			close(r.bodyCh)
+			//close(r.errCh)
+		}()
+
+		buf := make([]byte, 4096)
+		for total := 0; total < r.contentLength; {
+			var n int
+			var err error
+			m := r.contentLength - total
+			if len(buf) > m {
+				n, err = r.r.Read(buf[:m])
+			} else {
+				n, err = r.r.Read(buf)
+			}
+			if n > 0 {
+				// TODO: avoid copy
+				tmp := make([]byte, n)
+				copy(tmp, buf[:n])
+				r.bodyCh <- tmp
+				total += n
+			}
+			if err != nil {
+				if err == io.EOF {
+					return
+				}
+				r.errCh <- err
+				return
+			}
+		}
+	}()
+}
+
+func (r *FixedLengthBodyReader) Cancel() {
+	r.done <- struct{}{}
+}
+
+func (r *FixedLengthBodyReader) BodyReceived() <-chan []byte {
+	return r.bodyCh
+}
+
+func (r *FixedLengthBodyReader) ErrorOccurred() <-chan error {
+	return r.errCh
 }
