@@ -34,3 +34,16 @@ var ResponseBadRequest = &Response{
 	Status:  400,
 	Phrase:  "Bad Request",
 }
+
+func RemoveHopByHopHeaders(h HTTPHeader) {
+	delete(h, "connection")
+	delete(h, "keep-alive")
+	delete(h, "proxy-authenticate")
+	delete(h, "proxy-authorization")
+	delete(h, "te")
+	delete(h, "trailer")
+	delete(h, "transfer-encoding")
+	delete(h, "upgrade")
+	// non-standard
+	delete(h, "proxy-connection")
+}

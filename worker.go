@@ -38,6 +38,24 @@ func contentLength(h HTTPHeader) (int, error) {
 	return cl, nil
 }
 
+func isTransferEncodingChunked(h HTTPHeader) bool {
+	te, ok := h["transfer-encoding"]
+	if !ok {
+		return false
+	}
+	return te == "chunked"
+}
+
+func createBodyReader(r io.Reader, h HTTPHeader) BodyReader {
+	if cl, err := contentLength(h); err == nil {
+		return NewFixedLengthBodyReader(r, cl)
+	}
+	if isTransferEncodingChunked(h) {
+		return NewChunkedBodyReader(r)
+	}
+	return nil
+}
+
 type DialerFunc func(string) (net.Conn, error)
 
 // Used to connect server. Can be mocked.
@@ -71,6 +89,7 @@ func NewWorker() *Worker {
 }
 
 func (w *Worker) Start(conn net.Conn) {
+	log.Printf("I worker started")
 	// defer conn.Close()
 	w.clientConn = conn
 	w.clientReader = bufio.NewReader(conn)
@@ -78,6 +97,7 @@ func (w *Worker) Start(conn net.Conn) {
 	for state := waitForRequest; state != nil; {
 		state = state(w)
 	}
+	log.Printf("I worker finished")
 }
 
 func (w *Worker) Cancel() {
@@ -101,7 +121,8 @@ func (w *Worker) dialToServer() error {
 func (w *Worker) requestReceived(req *Request) stateFunc {
 	w.req = req
 
-	if req.Method != "GET" {
+	if req.Method != "GET" && req.Method != "HEAD" {
+		log.Printf("E %s is not supported", req.Method)
 		w.res = ResponseBadRequest // Should be appropriate response
 		return sendErrorResponse
 	}
@@ -117,12 +138,16 @@ func (w *Worker) requestReceived(req *Request) stateFunc {
 		w.serverConn.RemoteAddr().String())
 	log.Printf("I %s %v", w.req.URI, w.req.Headers)
 
+	RemoveHopByHopHeaders(w.req.Headers)
 	WriteRequest(w.serverConn, req)
 	return waitForResponse
 }
 
 func (w *Worker) responseReceived(res *Response) stateFunc {
 	w.res = res
+	log.Printf("I response: %d %v", w.res.Status, w.res.Headers)
+
+	// TODO: call RemoveHopByHopHeaders()
 	WriteResponse(w.clientConn, res)
 	return receiveBody
 }
@@ -134,6 +159,7 @@ func (w *Worker) transferBody(reader BodyReader, writer io.Writer) {
 		select {
 		case b := <-reader.BodyReceived():
 			if len(b) == 0 {
+				log.Printf("I body received done")
 				return
 			}
 			n, err := writer.Write(b)
@@ -143,7 +169,7 @@ func (w *Worker) transferBody(reader BodyReader, writer io.Writer) {
 				return
 			}
 		case err := <-reader.ErrorOccurred():
-			log.Printf("reader error: %v\n", err)
+			log.Printf("E reader error: %v", err)
 			return
 		case <-w.done:
 			log.Println("W transferBody done")
@@ -212,13 +238,12 @@ func receiveBody(w *Worker) stateFunc {
 	go func() {
 		defer wg.Done()
 
-		cl, err := contentLength(w.res.Headers)
-		if err != nil {
-			log.Printf("I no Content-Length, skipped reading body\n")
+		br := createBodyReader(w.serverReader, w.res.Headers)
+		if br == nil {
+			log.Printf("E unsupported transfer encoding")
 			return
 		}
-		r := NewFixedLengthBodyReader(w.serverReader, cl)
-		w.transferBody(r, w.clientConn)
+		w.transferBody(br, w.clientConn)
 	}()
 
 	wg.Wait()
@@ -233,12 +258,13 @@ func sendErrorResponse(w *Worker) stateFunc {
 
 func finishWorker(w *Worker) stateFunc {
 	if w.clientConn != nil {
+		log.Printf("I client conn closing")
 		w.clientConn.Close()
 	}
 	if w.serverConn != nil {
+		log.Printf("I server conn closing")
 		w.serverConn.Close()
 	}
 	close(w.done)
-	log.Printf("I worker finished")
 	return nil
 }

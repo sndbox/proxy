@@ -4,9 +4,18 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 )
+
+func toBufioReader(r io.Reader) *bufio.Reader {
+	if casted, ok := r.(*bufio.Reader); ok {
+		return casted
+	} else {
+		return bufio.NewReader(r)
+	}
+}
 
 type baseReader struct {
 	r     *bufio.Reader
@@ -64,14 +73,8 @@ type RequestReader struct {
 }
 
 func NewRequestReader(r io.Reader) *RequestReader {
-	var br *bufio.Reader
-	if casted, ok := r.(*bufio.Reader); ok {
-		br = casted
-	} else {
-		br = bufio.NewReader(r)
-	}
 	rr := &RequestReader{
-		baseReader{br, make(chan error)},
+		baseReader{toBufioReader(r), make(chan error)},
 		&Request{},
 		make(chan *Request),
 	}
@@ -127,14 +130,8 @@ type ResponseReader struct {
 }
 
 func NewResponseReader(r io.Reader) *ResponseReader {
-	var br *bufio.Reader
-	if casted, ok := r.(*bufio.Reader); ok {
-		br = casted
-	} else {
-		br = bufio.NewReader(r)
-	}
 	rr := &ResponseReader{
-		baseReader{br, make(chan error)},
+		baseReader{toBufioReader(r), make(chan error)},
 		&Response{},
 		make(chan *Response),
 	}
@@ -203,62 +200,152 @@ type BodyReader interface {
 	ErrorOccurred() <-chan error
 }
 
+type baseBodyReader struct {
+	r      *bufio.Reader
+	buf    []byte
+	bodyCh chan []byte
+	errCh  chan error
+	done   chan struct{}
+}
+
+func (r *baseBodyReader) Cancel() {
+	r.done <- struct{}{}
+}
+
+func (r *baseBodyReader) BodyReceived() <-chan []byte {
+	return r.bodyCh
+}
+
+func (r *baseBodyReader) ErrorOccurred() <-chan error {
+	return r.errCh
+}
+
+func (r *baseBodyReader) readAndSend(sz int) {
+	for total := 0; total < sz; {
+		var n int
+		var err error
+		m := sz - total
+		if len(r.buf) > m {
+			n, err = r.r.Read(r.buf[:m])
+		} else {
+			n, err = r.r.Read(r.buf)
+		}
+		if n > 0 {
+			// TODO: avoid copy
+			tmp := make([]byte, n)
+			copy(tmp, r.buf[:n])
+			r.bodyCh <- tmp
+			total += n
+		}
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			r.errCh <- err
+			return
+		}
+	}
+}
+
+// FixedLengthBodyReader reads a fixed size body
 type FixedLengthBodyReader struct {
-	r             io.Reader
+	baseBodyReader
 	contentLength int
-	bodyCh        chan []byte
-	errCh         chan error
-	done          chan struct{}
 }
 
 func NewFixedLengthBodyReader(r io.Reader, cl int) *FixedLengthBodyReader {
 	return &FixedLengthBodyReader{
-		r, cl, make(chan []byte), make(chan error), make(chan struct{})}
+		baseBodyReader{
+			toBufioReader(r),
+			make([]byte, 4096),
+			make(chan []byte),
+			make(chan error),
+			make(chan struct{})},
+		cl,
+	}
 }
 
 func (r *FixedLengthBodyReader) Start() {
 	go func() {
 		defer func() {
 			close(r.bodyCh)
-			//close(r.errCh)
+			log.Printf("I FixedLengthBodyReader done")
+		}()
+		r.readAndSend(r.contentLength)
+	}()
+}
+
+// ChunkedBodyReader reads chunked body
+type ChunkedBodyReader struct {
+	baseBodyReader
+}
+
+func NewChunkedBodyReader(r io.Reader) *ChunkedBodyReader {
+	return &ChunkedBodyReader{
+		baseBodyReader{
+			toBufioReader(r),
+			make([]byte, 4096),
+			make(chan []byte),
+			make(chan error),
+			make(chan struct{}),
+		},
+	}
+}
+
+func (r *ChunkedBodyReader) Start() {
+	go func() {
+		defer func() {
+			close(r.bodyCh)
+			log.Printf("I ChunkedBodyReader done")
 		}()
 
-		buf := make([]byte, 4096)
-		for total := 0; total < r.contentLength; {
-			var n int
-			var err error
-			m := r.contentLength - total
-			if len(buf) > m {
-				n, err = r.r.Read(buf[:m])
-			} else {
-				n, err = r.r.Read(buf)
+		for {
+			n, err := r.readAndSendChunkLength()
+			if err != nil {
+				r.errCh <- err
+				return
 			}
 			if n > 0 {
-				// TODO: avoid copy
-				tmp := make([]byte, n)
-				copy(tmp, buf[:n])
-				r.bodyCh <- tmp
-				total += n
+				r.readAndSend(n)
 			}
-			if err != nil {
-				if err == io.EOF {
-					return
-				}
-				r.errCh <- err
+			// Read trailer \r\n
+			b, err := r.r.ReadBytes('\n')
+			if err != nil || len(b) != 2 {
+				r.errCh <- fmt.Errorf("Missing trailer in chunked encoding")
+				return
+			}
+			r.bodyCh <- b
+			if n == 0 {
 				return
 			}
 		}
 	}()
 }
 
-func (r *FixedLengthBodyReader) Cancel() {
-	r.done <- struct{}{}
-}
+func (r *ChunkedBodyReader) readAndSendChunkLength() (int, error) {
+	b, err := r.r.ReadBytes('\n')
+	if err != nil {
+		return 0, err
+	}
 
-func (r *FixedLengthBodyReader) BodyReceived() <-chan []byte {
-	return r.bodyCh
-}
+	n := len(b)
+	if n < 3 || b[n-2] != '\r' || b[n-1] != '\n' {
+		return 0, fmt.Errorf("Missing chunk length: %s", string(b))
+	}
 
-func (r *FixedLengthBodyReader) ErrorOccurred() <-chan error {
-	return r.errCh
+	l := 0
+	for _, c := range b[:n-2] {
+		if c >= '0' && c <= '9' {
+			l = l*16 + int(c-'0')
+		} else if c >= 'a' && c <= 'f' {
+			l = l*16 + int(c-'a') + 10
+		} else if c >= 'A' && c <= 'F' {
+			l = l*16 + int(c-'A') + 10
+		} else {
+			return 0, fmt.Errorf("Invalid chunk length: %s", string(b))
+		}
+	}
+
+	r.bodyCh <- b
+	return l, nil
 }

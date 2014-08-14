@@ -30,19 +30,18 @@ func readRequestSync(r io.Reader) (*Request, error) {
 	return nil, nil
 }
 
-func readBodySync(r io.Reader, cl int) ([]byte, error) {
-	fr := NewFixedLengthBodyReader(r, cl)
-	fr.Start()
+func readBodySync(r BodyReader) ([]byte, error) {
+	r.Start()
 
 	var body []byte
 	for {
 		select {
-		case b := <-fr.BodyReceived():
+		case b := <-r.BodyReceived():
 			if len(b) == 0 {
 				return body, nil
 			}
 			body = append(body, b...)
-		case err := <-fr.ErrorOccurred():
+		case err := <-r.ErrorOccurred():
 			return nil, err
 		}
 	}
@@ -87,10 +86,21 @@ func TestResponseReader(t *testing.T) {
 }
 
 func TestFixedLengthBodyReader(t *testing.T) {
-	r := strings.NewReader("FooBarBaz")
-	body, err := readBodySync(r, 6)
+	sr := strings.NewReader("FooBarBaz")
+	r := NewFixedLengthBodyReader(sr, 6)
+	body, err := readBodySync(r)
 	if err != nil {
 		t.Errorf("error: %v", err)
 	}
 	ExpectEqual(t, "FooBar", string(body))
+}
+
+func TestChunkedBodyReader(t *testing.T) {
+	sr := strings.NewReader("6\r\nFooBar\r\nd\r\nThisIsChunked\r\n0\r\n\r\n")
+	r := NewChunkedBodyReader(sr)
+	body, err := readBodySync(r)
+	if err != nil {
+		t.Errorf("error: %v", err)
+	}
+	ExpectEqual(t, "6\r\nFooBar\r\nd\r\nThisIsChunked\r\n0\r\n\r\n", string(body))
 }

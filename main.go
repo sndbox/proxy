@@ -6,14 +6,15 @@ import (
 	"net"
 )
 
-var port = flag.String("port", "8080", "port number")
+var port = flag.String("port", "8082", "port number")
 
 func handle(conn net.Conn) {
 	worker := NewWorker()
-	worker.Start(conn) // worker takes the ownership of |conn|
+	worker.Start(conn)
 }
 
 func serve() {
+	flag.Parse()
 	ln, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
 		panic(err)
@@ -23,9 +24,10 @@ func serve() {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("accept error: %v", err)
+			log.Printf("E accept error: %v", err)
 			continue
 		}
+		log.Printf("I accept conn: %v", conn)
 		go handle(conn)
 	}
 }

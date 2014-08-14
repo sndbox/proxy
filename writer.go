@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"sort"
 	"unicode"
 )
 
@@ -24,18 +25,26 @@ func capitalizeHeader(h string) string {
 	return string(ret)
 }
 
-func WriteRequest(w io.Writer, req *Request) {
-	fmt.Fprintf(w, "%s %s %s\r\n", req.Method, req.URI, req.Version)
-	for k, v := range req.Headers {
-		fmt.Fprintf(w, "%s: %s\r\n", capitalizeHeader(k), v)
+func writeHeaders(w io.Writer, h HTTPHeader) {
+	keys := make([]string, len(h))
+	i := 0
+	for k, _ := range h {
+		keys[i] = k
+		i++
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s: %s\r\n", capitalizeHeader(k), h[k])
 	}
 	fmt.Fprintf(w, "\r\n")
 }
 
+func WriteRequest(w io.Writer, req *Request) {
+	fmt.Fprintf(w, "%s %s %s\r\n", req.Method, req.URI, req.Version)
+	writeHeaders(w, req.Headers)
+}
+
 func WriteResponse(w io.Writer, res *Response) {
 	fmt.Fprintf(w, "%s %d %s\r\n", res.Version, res.Status, res.Phrase)
-	for k, v := range res.Headers {
-		fmt.Fprintf(w, "%s: %s\r\n", capitalizeHeader(k), v)
-	}
-	fmt.Fprintf(w, "\r\n")
+	writeHeaders(w, res.Headers)
 }
