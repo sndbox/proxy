@@ -209,7 +209,8 @@ type baseBodyReader struct {
 }
 
 func (r *baseBodyReader) Cancel() {
-	r.done <- struct{}{}
+	log.Printf("I body reader canceled")
+	close(r.done)
 }
 
 func (r *baseBodyReader) BodyReceived() <-chan []byte {
@@ -218,6 +219,15 @@ func (r *baseBodyReader) BodyReceived() <-chan []byte {
 
 func (r *baseBodyReader) ErrorOccurred() <-chan error {
 	return r.errCh
+}
+
+func (r *baseBodyReader) sendError(err error) {
+	// TODO: of course this is wrong.
+	select {
+	case <-r.done:
+		log.Printf("W body reader closed while sending error")
+	case r.errCh <- err:
+	}
 }
 
 func (r *baseBodyReader) readAndSend(sz int) {
@@ -234,14 +244,19 @@ func (r *baseBodyReader) readAndSend(sz int) {
 			// TODO: avoid copy
 			tmp := make([]byte, n)
 			copy(tmp, r.buf[:n])
-			r.bodyCh <- tmp
+			// TODO: what a ugly code
+			select {
+			case r.bodyCh <- tmp:
+			case <-r.done:
+				log.Printf("W body reader closed while sending body")
+				return
+			}
 			total += n
 		}
 		if err != nil {
-			if err == io.EOF {
-				return
+			if err != io.EOF {
+				r.sendError(err)
 			}
-			r.errCh <- err
 			return
 		}
 	}
@@ -302,7 +317,7 @@ func (r *ChunkedBodyReader) Start() {
 		for {
 			n, err := r.readAndSendChunkLength()
 			if err != nil {
-				r.errCh <- err
+				r.sendError(err)
 				return
 			}
 			if n > 0 {
@@ -311,7 +326,7 @@ func (r *ChunkedBodyReader) Start() {
 			// Read trailer \r\n
 			b, err := r.r.ReadBytes('\n')
 			if err != nil || len(b) != 2 {
-				r.errCh <- fmt.Errorf("Missing trailer in chunked encoding")
+				r.sendError(fmt.Errorf("Missing trailer in chunked encoding"))
 				return
 			}
 			r.bodyCh <- b
@@ -348,4 +363,33 @@ func (r *ChunkedBodyReader) readAndSendChunkLength() (int, error) {
 
 	r.bodyCh <- b
 	return l, nil
+}
+
+// ClientConnectionWatcher is used when a request has no body.
+// It checks whether a client is alive.
+type ClientConnectionWatcher struct {
+	baseBodyReader
+}
+
+func NewClientConnectionWatcher(r io.Reader) *ClientConnectionWatcher {
+	return &ClientConnectionWatcher{
+		baseBodyReader{
+			toBufioReader(r),
+			make([]byte, 4096),
+			make(chan []byte),
+			make(chan error),
+			make(chan struct{}),
+		},
+	}
+}
+
+func (w *ClientConnectionWatcher) Start() {
+	go func() {
+		// Never sends body
+		defer close(w.bodyCh)
+		_, err := w.r.ReadByte()
+		if err != nil {
+			w.sendError(err)
+		}
+	}()
 }
