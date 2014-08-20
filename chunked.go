@@ -85,3 +85,68 @@ func (r *ChunkedReader) Read(b []byte) (int, error) {
 
 	return m, nil
 }
+
+var crlf = []byte("\r\n")
+var closeBytes = []byte("0\r\n\r\n")
+
+type ChunkedWriter struct {
+	w io.Writer
+}
+
+func NewChunkedWriter(w io.Writer) *ChunkedWriter {
+	return &ChunkedWriter{w}
+}
+
+func (w *ChunkedWriter) writeChunkLength(n int) error {
+	b := make([]byte, 0, 8)
+	for n > 0 {
+		hex := n % 16
+		if hex >= 10 {
+			b = append(b, byte(hex-10)+'a')
+		} else {
+			b = append(b, byte(hex)+'0')
+		}
+		n = n / 16
+	}
+	// TODO: avoid reverse
+	blen := len(b)
+	for i := 0; i < blen/2; i++ {
+		x, y := b[i], b[blen-i-1]
+		b[i] = y
+		b[blen-i-1] = x
+	}
+	b = append(b, crlf...)
+	m, err := w.w.Write(b)
+	if m != blen+2 || err != nil {
+		return fmt.Errorf("Failed to write chunk length")
+	}
+	return nil
+}
+
+func (w *ChunkedWriter) Write(b []byte) (int, error) {
+	blen := len(b)
+	if err := w.writeChunkLength(blen); err != nil {
+		return 0, err
+	}
+	writeSoFar := 0
+	for writeSoFar < blen {
+		m, err := w.w.Write(b[writeSoFar:])
+		writeSoFar += m
+		if err != nil {
+			return writeSoFar, err
+		}
+	}
+	m, err := w.w.Write(crlf)
+	if m != 2 || err != nil {
+		return blen, fmt.Errorf("Failed to write CRLF")
+	}
+	return blen, nil
+}
+
+func (w *ChunkedWriter) Close() error {
+	n, err := w.w.Write(closeBytes)
+	if err != nil || n != len(closeBytes) {
+		return fmt.Errorf("Failed to write the last chunk")
+	}
+	return nil
+}

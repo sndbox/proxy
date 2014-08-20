@@ -27,3 +27,11 @@ func TestChunkedReader(t *testing.T) {
 	}
 	ExpectEqual(t, "ThisIsChunkedAllYourBaseAreBelongToUs", actual)
 }
+
+func TestChunkedWriter(t *testing.T) {
+	buf := new(bytes.Buffer)
+	w := NewChunkedWriter(buf)
+	w.Write([]byte("FooBar"))
+	w.Close()
+	ExpectEqual(t, "6\r\nFooBar\r\n0\r\n\r\n", buf.String())
+}
