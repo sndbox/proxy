@@ -28,10 +28,29 @@ func TestChunkedReader(t *testing.T) {
 	ExpectEqual(t, "ThisIsChunkedAllYourBaseAreBelongToUs", actual)
 }
 
-func TestChunkedWriter(t *testing.T) {
+func writeChunked(ss []string) (string, error) {
 	buf := new(bytes.Buffer)
 	w := NewChunkedWriter(buf)
-	w.Write([]byte("FooBar"))
+	for _, s := range ss {
+		_, err := w.Write([]byte(s))
+		if err != nil {
+			return "", err
+		}
+	}
 	w.Close()
-	ExpectEqual(t, "6\r\nFooBar\r\n0\r\n\r\n", buf.String())
+	return buf.String(), nil
+}
+
+func TestChunkedWriter(t *testing.T) {
+	actual, err := writeChunked([]string{"FooBar"})
+	if err != nil {
+		t.Error(err)
+	}
+	ExpectEqual(t, "6\r\nFooBar\r\n0\r\n\r\n", actual)
+
+	actual, err = writeChunked([]string{"ThisIsChunked", "AllYourBaseAreBelongToUs"})
+	if err != nil {
+		t.Error(err)
+	}
+	ExpectEqual(t, "d\r\nThisIsChunked\r\n18\r\nAllYourBaseAreBelongToUs\r\n0\r\n\r\n", actual)
 }
